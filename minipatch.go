@@ -12,7 +12,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"io/ioutil"
 	"math"
@@ -23,8 +25,14 @@ const (
 	OpCopy   byte = 0
 	OpInsert byte = 1
 	OpDelete byte = 2
+	OpCRC    byte = 3
 
 	DefaultTimeout = 5 * time.Second
+)
+
+var (
+	ErrCRC       = errors.New("CRC mismatch")
+	ErrExtraData = errors.New("unexpected data following CRC")
 )
 
 func MakePatch(before, after io.Reader, output io.Writer) error {
@@ -75,11 +83,21 @@ func MakePatchTimeout(before, after io.Reader, patch io.Writer, timeout time.Dur
 		}
 	}
 
+	n := crc32.NewIEEE()
+	n.Write(afterBytes)
+
+	if _, err := patch.Write(n.Sum([]byte{OpCRC})); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func ApplyPatch(before, patch io.Reader, after io.Writer) error {
-	// Work with ByteReaders to simplify things
+	var crcRead bool
+	var n = crc32.NewIEEE()
+
+	after = io.MultiWriter(after, n)
 	beforeBR := bufio.NewReader(before)
 	patchBR := bufio.NewReader(patch)
 
@@ -91,9 +109,16 @@ func ApplyPatch(before, patch io.Reader, after io.Writer) error {
 			return err
 		}
 
-		tl, err := binary.ReadUvarint(patchBR)
-		if err != nil {
-			return err
+		if crcRead {
+			return ErrExtraData
+		}
+
+		var tl uint64
+		if op != OpCRC {
+			tl, err = binary.ReadUvarint(patchBR)
+			if err != nil {
+				return err
+			}
 		}
 
 		switch op {
@@ -112,6 +137,18 @@ func ApplyPatch(before, patch io.Reader, after io.Writer) error {
 			if err != nil {
 				return err
 			}
+		case OpCRC:
+			patchCRC := make([]byte, 4)
+			_, err := io.ReadFull(patchBR, patchCRC)
+			if err != nil {
+				return err
+			}
+
+			if !bytes.Equal(patchCRC, n.Sum(nil)) {
+				return ErrCRC
+			}
+			crcRead = true
+
 		default:
 			return fmt.Errorf("unexpected operation byte: %x", op)
 		}
