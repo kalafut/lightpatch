@@ -22,10 +22,10 @@ import (
 )
 
 const (
-	OpCopy   byte = 0
-	OpInsert byte = 1
-	OpDelete byte = 2
-	OpCRC    byte = 3
+	OpCopy   byte = 'C'
+	OpInsert byte = 'I'
+	OpDelete byte = 'D'
+	OpCRC    byte = 'K'
 
 	DefaultTimeout = 5 * time.Second
 )
