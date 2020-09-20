@@ -2,74 +2,108 @@
 // https://github.com/sergi/go-diff
 // See the included LICENSE file for license details.
 //
-// go-diff is a Go implementation of Google's Diff, Match, and Patch library
+// go-diff is a Go implementation of Google's diff, Match, and Patch library
 // Original library is Copyright (c) 2006 Google Inc.
 // http://code.google.com/p/google-diff-match-patch/
 
 package minipatch
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"math"
-	"strings"
 	"time"
 )
 
-// JPatch holds the configuration for diff-match-patch operations.
-type JPatch struct {
-	// Number of seconds to map a diff before giving up (0 for infinity).
-	DiffTimeout time.Duration
-	// Cost of an empty edit operation in terms of edit characters.
-	DiffEditCost int
-	// How far to search for a match (0 = exact location, 1000+ = broad match). A match this many characters away from the expected location will add 1.0 to the score (0.0 is a perfect match).
-	MatchDistance int
-	// When deleting a large block of text (over ~64 characters), how close do the contents have to be to match the expected contents. (0.0 = perfection, 1.0 = very loose).  Note that MatchThreshold controls how closely the end points of a delete need to match.
-	PatchDeleteThreshold float64
-	// Chunk size for context length.
-	PatchMargin int
-	// The number of bits in an int.
-	MatchMaxBits int
-	// At what point is no match declared (0.0 = perfection, 1.0 = very loose).
-	MatchThreshold float64
-}
-
-// New creates a new JPatch object with default parameters.
-func New() *JPatch {
-	// Defaults.
-	return &JPatch{
-		DiffTimeout:          5 * time.Second,
-		DiffEditCost:         4,
-		MatchThreshold:       0.5,
-		MatchDistance:        1000,
-		PatchDeleteThreshold: 0.5,
-		PatchMargin:          4,
-		MatchMaxBits:         32,
-	}
-}
-
-// Operation defines the operation of a diff item.
-type Operation int8
-
 const (
-	// DiffDelete item represents a delete diff.
-	DiffDelete Operation = 2
-	// DiffInsert item represents an insert diff.
-	DiffInsert Operation = 1
-	// DiffEqual item represents an equal diff.
-	DiffEqual Operation = 0
+	OpCopy   byte = 0
+	OpInsert byte = 1
+	OpDelete byte = 2
+
+	DefaultTimeout = 5 * time.Second
 )
 
-// Diff represents one diff operation
-type Diff struct {
-	Type Operation
+func MakePatch(before, after io.Reader, output io.Writer) error {
+	return MakePatchTimeout(before, after, output, DefaultTimeout)
+}
+
+func MakePatchTimeout(before, after io.Reader, patch io.Writer, timeout time.Duration) error {
+	a, _ := ioutil.ReadAll(before)
+	b, _ := ioutil.ReadAll(after)
+	diffs := diffMain(a, b, timeout)
+
+	vb := make([]byte, binary.MaxVarintLen64)
+
+	for _, diff := range diffs {
+		patch.Write([]byte{diff.Type})
+
+		n := binary.PutUvarint(vb, uint64(len(diff.Text)))
+		patch.Write(vb[:n])
+
+		if diff.Type == OpInsert {
+			patch.Write(diff.Text)
+		}
+	}
+
+	return nil
+}
+
+func ApplyPatch(before, patch io.Reader, after io.Writer) error {
+	// Work with ByteReaders to simplify things
+	beforeBR := bufio.NewReader(before)
+	patchBR := bufio.NewReader(patch)
+
+	for {
+		op, err := patchBR.ReadByte()
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			return err
+		}
+
+		tl, err := binary.ReadUvarint(patchBR)
+		if err != nil {
+			return err
+		}
+
+		switch op {
+		case OpCopy:
+			_, err := io.CopyN(after, beforeBR, int64(tl))
+			if err != nil {
+				return err
+			}
+		case OpInsert:
+			_, err := io.CopyN(after, patchBR, int64(tl))
+			if err != nil {
+				return err
+			}
+		case OpDelete:
+			_, err := beforeBR.Discard(int(tl))
+			if err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unexpected operation byte: %x", op)
+		}
+	}
+
+	return nil
+}
+
+// diff represents one diff operation
+type diff struct {
+	Type byte
 	Text []byte
 }
 
+const diffEditCost = 4
+
 // splice removes amount elements from slice at index index, replacing them with elements.
-func splice(slice []Diff, index int, amount int, elements ...Diff) []Diff {
+func splice(slice []diff, index int, amount int, elements ...diff) []diff {
 	if len(elements) == amount {
 		// Easy case: overwrite the relevant items.
 		copy(slice[index:], elements)
@@ -86,7 +120,7 @@ func splice(slice []Diff, index int, amount int, elements ...Diff) []Diff {
 		// Zero stranded elements at end so that they can be garbage collected.
 		tail := slice[end:]
 		for i := range tail {
-			tail[i] = Diff{}
+			tail[i] = diff{}
 		}
 		return slice[:end]
 	}
@@ -96,7 +130,7 @@ func splice(slice []Diff, index int, amount int, elements ...Diff) []Diff {
 	// but this is simple and clear.
 	need := len(slice) - amount + len(elements)
 	for len(slice) < need {
-		slice = append(slice, Diff{})
+		slice = append(slice, diff{})
 	}
 	// Shift slice elements right to make room for new elements.
 	copy(slice[index+len(elements):], slice[index+amount:])
@@ -105,37 +139,20 @@ func splice(slice []Diff, index int, amount int, elements ...Diff) []Diff {
 	return slice
 }
 
-// DiffMain finds the differences between two texts.
-// If an invalid UTF-8 sequence is encountered, it will be replaced by the Unicode replacement character.
-func MakePatch(a, b []byte, opts ...*JPatch) []byte {
-	dmp := New()
-	if len(opts) > 0 {
-		dmp = opts[0]
-	}
-	return encodeDiffs(dmp.DiffMainRunes(a, b, false))
-}
-
-// DiffMain finds the differences between two texts.
-// If an invalid UTF-8 sequence is encountered, it will be replaced by the Unicode replacement character.
-func (dmp *JPatch) DiffMain(text1, text2 []byte, checklines bool) []Diff {
-	return dmp.DiffMainRunes([]byte(text1), []byte(text2), checklines)
-}
-
-// DiffMainRunes finds the differences between two rune sequences.
-// If an invalid UTF-8 sequence is encountered, it will be replaced by the Unicode replacement character.
-func (dmp *JPatch) DiffMainRunes(text1, text2 []byte, checklines bool) []Diff {
+// DiffMainBytes finds the differences between two byte sequences.
+func diffMain(text1, text2 []byte, timeout time.Duration) []diff {
 	var deadline time.Time
-	if dmp.DiffTimeout > 0 {
-		deadline = time.Now().Add(dmp.DiffTimeout)
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
 	}
-	return dmp.diffMainRunes(text1, text2, checklines, deadline)
+	return diffMainBytes(text1, text2, deadline)
 }
 
-func (dmp *JPatch) diffMainRunes(text1, text2 []byte, checklines bool, deadline time.Time) []Diff {
+func diffMainBytes(text1, text2 []byte, deadline time.Time) []diff {
 	if bytes.Equal(text1, text2) {
-		diffs := []Diff{}
+		diffs := []diff{}
 		if len(text1) > 0 {
-			diffs = append(diffs, Diff{DiffEqual, clone(text1)})
+			diffs = append(diffs, diff{OpCopy, clone(text1)})
 		}
 		return diffs
 	}
@@ -152,17 +169,17 @@ func (dmp *JPatch) diffMainRunes(text1, text2 []byte, checklines bool, deadline 
 	text2 = text2[:len(text2)-commonlength]
 
 	// Compute the diff on the middle block.
-	diffs := dmp.diffCompute(text1, text2, checklines, deadline)
+	diffs := diffCompute(text1, text2, deadline)
 
 	// Restore the prefix and suffix.
 	if len(commonprefix) != 0 {
-		diffs = append([]Diff{Diff{DiffEqual, clone(commonprefix)}}, diffs...)
+		diffs = append([]diff{diff{OpCopy, clone(commonprefix)}}, diffs...)
 	}
 	if len(commonsuffix) != 0 {
-		diffs = append(diffs, Diff{DiffEqual, clone(commonsuffix)})
+		diffs = append(diffs, diff{OpCopy, clone(commonsuffix)})
 	}
 
-	return dmp.diffCleanupMerge(diffs)
+	return diffCleanupMerge(diffs)
 }
 
 func clone(in []byte) []byte {
@@ -185,14 +202,14 @@ func cleanAppend(slices ...[]byte) []byte {
 }
 
 // diffCompute finds the differences between two rune slices.  Assumes that the texts do not have any common prefix or suffix.
-func (dmp *JPatch) diffCompute(text1, text2 []byte, checklines bool, deadline time.Time) []Diff {
-	diffs := []Diff{}
+func diffCompute(text1, text2 []byte, deadline time.Time) []diff {
+	diffs := []diff{}
 	if len(text1) == 0 {
 		// Just add some text (speedup).
-		return append(diffs, Diff{DiffInsert, clone(text2)})
+		return append(diffs, diff{OpInsert, clone(text2)})
 	} else if len(text2) == 0 {
 		// Just delete some text (speedup).
-		return append(diffs, Diff{DiffDelete, clone(text1)})
+		return append(diffs, diff{OpDelete, clone(text1)})
 	}
 
 	var longtext, shorttext []byte
@@ -205,26 +222,26 @@ func (dmp *JPatch) diffCompute(text1, text2 []byte, checklines bool, deadline ti
 	}
 
 	if i := bytes.Index(longtext, shorttext); i != -1 {
-		op := DiffInsert
+		op := OpInsert
 		// Swap insertions for deletions if diff is reversed.
 		if len(text1) > len(text2) {
-			op = DiffDelete
+			op = OpDelete
 		}
 		// Shorter text is inside the longer text (speedup).
-		return []Diff{
-			Diff{op, clone(longtext[:i])},
-			Diff{DiffEqual, clone(shorttext)},
-			Diff{op, clone(longtext[i+len(shorttext):])},
+		return []diff{
+			diff{op, clone(longtext[:i])},
+			diff{OpCopy, clone(shorttext)},
+			diff{op, clone(longtext[i+len(shorttext):])},
 		}
 	} else if len(shorttext) == 1 {
 		// Single character string.
 		// After the previous speedup, the character can't be an equality.
-		return []Diff{
-			Diff{DiffDelete, clone(text1)},
-			Diff{DiffInsert, clone(text2)},
+		return []diff{
+			diff{OpDelete, clone(text1)},
+			diff{OpInsert, clone(text2)},
 		}
 		// Check to see if the problem can be split in two.
-	} else if hm := dmp.diffHalfMatch(text1, text2); hm != nil {
+	} else if hm := diffHalfMatch(text1, text2, deadline.IsZero()); hm != nil {
 		// A half-match was found, sort out the return data.
 		text1A := hm[0]
 		text1B := hm[1]
@@ -232,30 +249,30 @@ func (dmp *JPatch) diffCompute(text1, text2 []byte, checklines bool, deadline ti
 		text2B := hm[3]
 		midCommon := hm[4]
 		// Send both pairs off for separate processing.
-		diffsA := dmp.diffMainRunes(text1A, text2A, checklines, deadline)
-		diffsB := dmp.diffMainRunes(text1B, text2B, checklines, deadline)
+		diffsA := diffMainBytes(text1A, text2A, deadline)
+		diffsB := diffMainBytes(text1B, text2B, deadline)
 		// Merge the results.
 		diffs := diffsA
-		diffs = append(diffs, Diff{DiffEqual, clone(midCommon)})
+		diffs = append(diffs, diff{OpCopy, clone(midCommon)})
 		diffs = append(diffs, diffsB...)
 		return diffs
 		//} else if checklines && len(text1) > 100 && len(text2) > 100 {
 		//	return dmp.diffLineMode(text1, text2, deadline)
 	}
-	return dmp.diffBisect(text1, text2, deadline)
+	return diffBisect(text1, text2, deadline)
 }
 
 // DiffBisect finds the 'middle snake' of a diff, split the problem in two and return the recursively constructed diff.
 // If an invalid UTF-8 sequence is encountered, it will be replaced by the Unicode replacement character.
 // See Myers 1986 paper: An O(ND) Difference Algorithm and Its Variations.
-//func (dmp *JPatch) DiffBisect(text1, text2 string, deadline time.Time) []Diff {
+//func (dmp *MiniPatch) DiffBisect(text1, text2 string, deadline time.Time) []diff {
 //	// Unused in this code, but retained for interface compatibility.
 //	return dmp.diffBisect([]rune(text1), []rune(text2), deadline)
 //}
 
 // diffBisect finds the 'middle snake' of a diff, splits the problem in two and returns the recursively constructed diff.
 // See Myers's 1986 paper: An O(ND) Difference Algorithm and Its Variations.
-func (dmp *JPatch) diffBisect(runes1, runes2 []byte, deadline time.Time) []Diff {
+func diffBisect(runes1, runes2 []byte, deadline time.Time) []diff {
 	// Cache the text lengths to prevent multiple calls.
 	runes1Len, runes2Len := len(runes1), len(runes2)
 
@@ -319,7 +336,7 @@ func (dmp *JPatch) diffBisect(runes1, runes2 []byte, deadline time.Time) []Diff 
 					x2 := runes1Len - v2[k2Offset]
 					if x1 >= x2 {
 						// Overlap detected.
-						return dmp.diffBisectSplit(runes1, runes2, x1, y1, deadline)
+						return diffBisectSplit(runes1, runes2, x1, y1, deadline)
 					}
 				}
 			}
@@ -357,62 +374,31 @@ func (dmp *JPatch) diffBisect(runes1, runes2 []byte, deadline time.Time) []Diff 
 					x2 = runes1Len - x2
 					if x1 >= x2 {
 						// Overlap detected.
-						return dmp.diffBisectSplit(runes1, runes2, x1, y1, deadline)
+						return diffBisectSplit(runes1, runes2, x1, y1, deadline)
 					}
 				}
 			}
 		}
 	}
-	// Diff took too long and hit the deadline or number of diffs equals number of characters, no commonality at all.
-	return []Diff{
-		Diff{DiffDelete, clone(runes1)},
-		Diff{DiffInsert, clone(runes2)},
+	// diff took too long and hit the deadline or number of diffs equals number of characters, no commonality at all.
+	return []diff{
+		diff{OpDelete, clone(runes1)},
+		diff{OpInsert, clone(runes2)},
 	}
 }
 
-func (dmp *JPatch) diffBisectSplit(runes1, runes2 []byte, x, y int,
-	deadline time.Time) []Diff {
+func diffBisectSplit(runes1, runes2 []byte, x, y int,
+	deadline time.Time) []diff {
 	runes1a := runes1[:x]
 	runes2a := runes2[:y]
 	runes1b := runes1[x:]
 	runes2b := runes2[y:]
 
 	// Compute both diffs serially.
-	diffs := dmp.diffMainRunes(runes1a, runes2a, false, deadline)
-	diffsb := dmp.diffMainRunes(runes1b, runes2b, false, deadline)
+	diffs := diffMainBytes(runes1a, runes2a, deadline)
+	diffsb := diffMainBytes(runes1b, runes2b, deadline)
 
 	return append(diffs, diffsb...)
-}
-
-// diffLinesToRunesMunge splits a text into an array of strings, and reduces the texts to a []rune where each Unicode character represents one line.
-// We use strings instead of []runes as input mainly because you can't use []rune as a map key.
-func (dmp *JPatch) diffLinesToRunesMunge(text string, lineArray *[]string, lineHash map[string]int) []rune {
-	// Walk the text, pulling out a substring for each line. text.split('\n') would would temporarily double our memory footprint. Modifying text would create many large strings to garbage collect.
-	lineStart := 0
-	lineEnd := -1
-	runes := []rune{}
-
-	for lineEnd < len(text)-1 {
-		lineEnd = indexOf(text, "\n", lineStart)
-
-		if lineEnd == -1 {
-			lineEnd = len(text) - 1
-		}
-
-		line := text[lineStart : lineEnd+1]
-		lineStart = lineEnd + 1
-		lineValue, ok := lineHash[line]
-
-		if ok {
-			runes = append(runes, rune(lineValue))
-		} else {
-			*lineArray = append(*lineArray, line)
-			lineHash[line] = len(*lineArray) - 1
-			runes = append(runes, rune(len(*lineArray)-1))
-		}
-	}
-
-	return runes
 }
 
 // commonPrefixLength returns the length of the common prefix of two rune slices.
@@ -442,8 +428,8 @@ func commonSuffixLength(text1, text2 []byte) int {
 	}
 }
 
-// DiffCommonOverlap determines if the suffix of one string is the prefix of another.
-func (dmp *JPatch) DiffCommonOverlap(text1 []byte, text2 []byte) int {
+// diffCommonOverlap determines if the suffix of one string is the prefix of another.
+func diffCommonOverlap(text1 []byte, text2 []byte) int {
 	// Cache the text lengths to prevent multiple calls.
 	text1Length := len(text1)
 	text2Length := len(text2)
@@ -482,8 +468,8 @@ func (dmp *JPatch) DiffCommonOverlap(text1 []byte, text2 []byte) int {
 	return best
 }
 
-func (dmp *JPatch) diffHalfMatch(text1, text2 []byte) [][]byte {
-	if dmp.DiffTimeout <= 0 {
+func diffHalfMatch(text1, text2 []byte, unlimitedTime bool) [][]byte {
+	if unlimitedTime {
 		// Don't risk returning a non-optimal diff if we have unlimited time.
 		return nil
 	}
@@ -502,10 +488,10 @@ func (dmp *JPatch) diffHalfMatch(text1, text2 []byte) [][]byte {
 	}
 
 	// First check if the second quarter is the seed for a half-match.
-	hm1 := dmp.diffHalfMatchI(longtext, shorttext, int(float64(len(longtext)+3)/4))
+	hm1 := diffHalfMatchI(longtext, shorttext, int(float64(len(longtext)+3)/4))
 
 	// Check again based on the third quarter.
-	hm2 := dmp.diffHalfMatchI(longtext, shorttext, int(float64(len(longtext)+1)/2))
+	hm2 := diffHalfMatchI(longtext, shorttext, int(float64(len(longtext)+1)/2))
 
 	hm := [][]byte{}
 	if hm1 == nil && hm2 == nil {
@@ -533,7 +519,7 @@ func (dmp *JPatch) diffHalfMatch(text1, text2 []byte) [][]byte {
 
 // diffHalfMatchI checks if a substring of shorttext exist within longtext such that the substring is at least half the length of longtext?
 // Returns a slice containing the prefix of longtext, the suffix of longtext, the prefix of shorttext, the suffix of shorttext and the common middle, or null if there was no match.
-func (dmp *JPatch) diffHalfMatchI(l, s []byte, i int) [][]byte {
+func diffHalfMatchI(l, s []byte, i int) [][]byte {
 	var bestCommonA []byte
 	var bestCommonB []byte
 	var bestCommonLen int
@@ -573,8 +559,8 @@ func (dmp *JPatch) diffHalfMatchI(l, s []byte, i int) [][]byte {
 	}
 }
 
-// DiffCleanupSemantic reduces the number of edits by eliminating semantically trivial equalities.
-func (dmp *JPatch) DiffCleanupSemantic(diffs []Diff) []Diff {
+// diffCleanupSemantic reduces the number of edits by eliminating semantically trivial equalities.
+func diffCleanupSemantic(diffs []diff) []diff {
 	changes := false
 	// Stack of indices where equalities are found.
 	equalities := make([]int, 0, len(diffs))
@@ -588,7 +574,7 @@ func (dmp *JPatch) DiffCleanupSemantic(diffs []Diff) []Diff {
 	var lengthInsertions2, lengthDeletions2 int
 
 	for pointer < len(diffs) {
-		if diffs[pointer].Type == DiffEqual {
+		if diffs[pointer].Type == OpCopy {
 			// Equality found.
 			equalities = append(equalities, pointer)
 			lengthInsertions1 = lengthInsertions2
@@ -599,7 +585,7 @@ func (dmp *JPatch) DiffCleanupSemantic(diffs []Diff) []Diff {
 		} else {
 			// An insertion or deletion.
 
-			if diffs[pointer].Type == DiffInsert {
+			if diffs[pointer].Type == OpInsert {
 				lengthInsertions2 += len(diffs[pointer].Text)
 			} else {
 				lengthDeletions2 += len(diffs[pointer].Text)
@@ -612,10 +598,10 @@ func (dmp *JPatch) DiffCleanupSemantic(diffs []Diff) []Diff {
 				(len(lastequality) <= difference2) {
 				// Duplicate record.
 				insPoint := equalities[len(equalities)-1]
-				diffs = splice(diffs, insPoint, 0, Diff{DiffDelete, lastequality})
+				diffs = splice(diffs, insPoint, 0, diff{OpDelete, lastequality})
 
 				// Change second copy to insert.
-				diffs[insPoint+1].Type = DiffInsert
+				diffs[insPoint+1].Type = OpInsert
 				// Throw away the equality we just deleted.
 				equalities = equalities[:len(equalities)-1]
 
@@ -640,7 +626,7 @@ func (dmp *JPatch) DiffCleanupSemantic(diffs []Diff) []Diff {
 
 	// Normalize the diff.
 	if changes {
-		diffs = dmp.diffCleanupMerge(diffs)
+		diffs = diffCleanupMerge(diffs)
 	}
 	// diffs = dmp.DiffCleanupSemanticLossless(diffs)
 	// Find any overlaps between deletions and insertions.
@@ -651,18 +637,18 @@ func (dmp *JPatch) DiffCleanupSemantic(diffs []Diff) []Diff {
 	// Only extract an overlap if it is as big as the edit ahead or behind it.
 	pointer = 1
 	for pointer < len(diffs) {
-		if diffs[pointer-1].Type == DiffDelete &&
-			diffs[pointer].Type == DiffInsert {
+		if diffs[pointer-1].Type == OpDelete &&
+			diffs[pointer].Type == OpInsert {
 			deletion := diffs[pointer-1].Text
 			insertion := diffs[pointer].Text
-			overlapLength1 := dmp.DiffCommonOverlap(deletion, insertion)
-			overlapLength2 := dmp.DiffCommonOverlap(insertion, deletion)
+			overlapLength1 := diffCommonOverlap(deletion, insertion)
+			overlapLength2 := diffCommonOverlap(insertion, deletion)
 			if overlapLength1 >= overlapLength2 {
 				if float64(overlapLength1) >= float64(len(deletion))/2 ||
 					float64(overlapLength1) >= float64(len(insertion))/2 {
 
 					// Overlap found. Insert an equality and trim the surrounding edits.
-					diffs = splice(diffs, pointer, 0, Diff{DiffEqual, insertion[:overlapLength1]})
+					diffs = splice(diffs, pointer, 0, diff{OpCopy, insertion[:overlapLength1]})
 					diffs[pointer-1].Text =
 						deletion[0 : len(deletion)-overlapLength1]
 					diffs[pointer+1].Text = insertion[overlapLength1:]
@@ -672,11 +658,11 @@ func (dmp *JPatch) DiffCleanupSemantic(diffs []Diff) []Diff {
 				if float64(overlapLength2) >= float64(len(deletion))/2 ||
 					float64(overlapLength2) >= float64(len(insertion))/2 {
 					// Reverse overlap found. Insert an equality and swap and trim the surrounding edits.
-					overlap := Diff{DiffEqual, deletion[:overlapLength2]}
+					overlap := diff{OpCopy, deletion[:overlapLength2]}
 					diffs = splice(diffs, pointer, 0, overlap)
-					diffs[pointer-1].Type = DiffInsert
+					diffs[pointer-1].Type = OpInsert
 					diffs[pointer-1].Text = insertion[0 : len(insertion)-overlapLength2]
-					diffs[pointer+1].Type = DiffDelete
+					diffs[pointer+1].Type = OpDelete
 					diffs[pointer+1].Text = deletion[overlapLength2:]
 					pointer++
 				}
@@ -690,7 +676,7 @@ func (dmp *JPatch) DiffCleanupSemantic(diffs []Diff) []Diff {
 }
 
 // diffCleanupEfficiency reduces the number of edits by eliminating operationally trivial equalities.
-func (dmp *JPatch) diffCleanupEfficiency(diffs []Diff) []Diff {
+func diffCleanupEfficiency(diffs []diff) []diff {
 	changes := false
 	// Stack of indices where equalities are found.
 	type equality struct {
@@ -710,8 +696,8 @@ func (dmp *JPatch) diffCleanupEfficiency(diffs []Diff) []Diff {
 	// Is there a deletion operation after the last equality.
 	postDel := false
 	for pointer < len(diffs) {
-		if diffs[pointer].Type == DiffEqual { // Equality found.
-			if len(diffs[pointer].Text) < dmp.DiffEditCost &&
+		if diffs[pointer].Type == OpCopy { // Equality found.
+			if len(diffs[pointer].Text) < diffEditCost &&
 				(postIns || postDel) {
 				// Candidate found.
 				equalities = &equality{
@@ -729,7 +715,7 @@ func (dmp *JPatch) diffCleanupEfficiency(diffs []Diff) []Diff {
 			postIns = false
 			postDel = false
 		} else { // An insertion or deletion.
-			if diffs[pointer].Type == DiffDelete {
+			if diffs[pointer].Type == OpDelete {
 				postDel = true
 			} else {
 				postIns = true
@@ -756,15 +742,15 @@ func (dmp *JPatch) diffCleanupEfficiency(diffs []Diff) []Diff {
 			}
 			if len(lastequality) > 0 &&
 				((preIns && preDel && postIns && postDel) ||
-					((len(lastequality) < dmp.DiffEditCost/2) && sumPres == 3)) {
+					((len(lastequality) < diffEditCost/2) && sumPres == 3)) {
 
 				insPoint := equalities.data
 
 				// Duplicate record.
-				diffs = splice(diffs, insPoint, 0, Diff{DiffDelete, lastequality})
+				diffs = splice(diffs, insPoint, 0, diff{OpDelete, lastequality})
 
 				// Change second copy to insert.
-				diffs[insPoint+1].Type = DiffInsert
+				diffs[insPoint+1].Type = OpInsert
 				// Throw away the equality we just deleted.
 				equalities = equalities.next
 				lastequality = nil
@@ -793,7 +779,7 @@ func (dmp *JPatch) diffCleanupEfficiency(diffs []Diff) []Diff {
 	}
 
 	if changes {
-		diffs = dmp.diffCleanupMerge(diffs)
+		diffs = diffCleanupMerge(diffs)
 	}
 
 	return diffs
@@ -801,9 +787,9 @@ func (dmp *JPatch) diffCleanupEfficiency(diffs []Diff) []Diff {
 
 // diffCleanupMerge reorders and merges like edit sections. Merge equalities.
 // Any edit section can move as long as it doesn't cross an equality.
-func (dmp *JPatch) diffCleanupMerge(diffs []Diff) []Diff {
+func diffCleanupMerge(diffs []diff) []diff {
 	// Add a dummy entry at the end.
-	diffs = append(diffs, Diff{DiffEqual, nil})
+	diffs = append(diffs, diff{OpCopy, nil})
 	pointer := 0
 	countDelete := 0
 	countInsert := 0
@@ -813,17 +799,17 @@ func (dmp *JPatch) diffCleanupMerge(diffs []Diff) []Diff {
 
 	for pointer < len(diffs) {
 		switch diffs[pointer].Type {
-		case DiffInsert:
+		case OpInsert:
 			countInsert++
 			textInsert = append(textInsert, diffs[pointer].Text...)
 			pointer++
 			break
-		case DiffDelete:
+		case OpDelete:
 			countDelete++
 			textDelete = append(textDelete, diffs[pointer].Text...)
 			pointer++
 			break
-		case DiffEqual:
+		case OpCopy:
 			// Upon reaching an equality, check for prior redundancies.
 			if countDelete+countInsert > 1 {
 				if countDelete != 0 && countInsert != 0 {
@@ -831,10 +817,10 @@ func (dmp *JPatch) diffCleanupMerge(diffs []Diff) []Diff {
 					commonlength = commonPrefixLength(textInsert, textDelete)
 					if commonlength != 0 {
 						x := pointer - countDelete - countInsert
-						if x > 0 && diffs[x-1].Type == DiffEqual {
+						if x > 0 && diffs[x-1].Type == OpCopy {
 							diffs[x-1].Text = append(diffs[x-1].Text, textInsert[:commonlength]...)
 						} else {
-							diffs = append([]Diff{Diff{DiffEqual, clone(textInsert[:commonlength])}}, diffs...)
+							diffs = append([]diff{diff{OpCopy, clone(textInsert[:commonlength])}}, diffs...)
 							pointer++
 						}
 						textInsert = textInsert[commonlength:]
@@ -854,16 +840,16 @@ func (dmp *JPatch) diffCleanupMerge(diffs []Diff) []Diff {
 				if countDelete == 0 {
 					diffs = splice(diffs, pointer-countInsert,
 						countDelete+countInsert,
-						Diff{DiffInsert, clone(textInsert)})
+						diff{OpInsert, clone(textInsert)})
 				} else if countInsert == 0 {
 					diffs = splice(diffs, pointer-countDelete,
 						countDelete+countInsert,
-						Diff{DiffDelete, clone(textDelete)})
+						diff{OpDelete, clone(textDelete)})
 				} else {
 					diffs = splice(diffs, pointer-countDelete-countInsert,
 						countDelete+countInsert,
-						Diff{DiffDelete, clone(textDelete)},
-						Diff{DiffInsert, clone(textInsert)})
+						diff{OpDelete, clone(textDelete)},
+						diff{OpInsert, clone(textInsert)})
 				}
 
 				pointer = pointer - countDelete - countInsert + 1
@@ -873,7 +859,7 @@ func (dmp *JPatch) diffCleanupMerge(diffs []Diff) []Diff {
 				if countInsert != 0 {
 					pointer++
 				}
-			} else if pointer != 0 && diffs[pointer-1].Type == DiffEqual {
+			} else if pointer != 0 && diffs[pointer-1].Type == OpCopy {
 				// Merge this equality with the previous one.
 				diffs[pointer-1].Text = cleanAppend(diffs[pointer-1].Text, diffs[pointer].Text)
 				diffs = append(diffs[:pointer], diffs[pointer+1:]...)
@@ -897,8 +883,8 @@ func (dmp *JPatch) diffCleanupMerge(diffs []Diff) []Diff {
 	pointer = 1
 	// Intentionally ignore the first and last element (don't need checking).
 	for pointer < (len(diffs) - 1) {
-		if diffs[pointer-1].Type == DiffEqual &&
-			diffs[pointer+1].Type == DiffEqual {
+		if diffs[pointer-1].Type == OpCopy &&
+			diffs[pointer+1].Type == OpCopy {
 			// This is a single edit surrounded by equalities.
 			if bytes.HasSuffix(diffs[pointer].Text, diffs[pointer-1].Text) {
 				// Shift the edit over the previous equality.
@@ -921,98 +907,10 @@ func (dmp *JPatch) diffCleanupMerge(diffs []Diff) []Diff {
 
 	// If shifts were made, the diff needs reordering and another shift sweep.
 	if changes {
-		diffs = dmp.diffCleanupMerge(diffs)
+		diffs = diffCleanupMerge(diffs)
 	}
 
 	return diffs
-}
-
-func ApplyPatch(src, patch []byte) ([]byte, error) {
-	out := make([]byte, 0, len(src))
-	remaining := src
-
-	pr := bytes.NewReader(patch)
-	ver, err := pr.ReadByte()
-	if err != nil {
-		return nil, fmt.Errorf("read error: %s", err)
-	}
-	if ver != version {
-		return nil, fmt.Errorf("unknown version %q", ver)
-	}
-
-	for {
-		op, err := pr.ReadByte()
-		if err == io.EOF {
-			break
-		} else if err != nil {
-			return nil, fmt.Errorf("read error: %s", err)
-		}
-
-		tl, err := binary.ReadUvarint(pr)
-		if err != nil {
-			return nil, err
-		}
-
-		switch op {
-		case OpEqual:
-			out = append(out, remaining[:tl]...)
-			remaining = remaining[tl:]
-		case OpInsert:
-			buf := make([]byte, tl)
-			pr.Read(buf)
-			out = append(out, buf...)
-		case OpDelete:
-			remaining = remaining[tl:]
-		default:
-			return nil, fmt.Errorf("unexpected operation byte: %x", op)
-		}
-	}
-
-	return out, nil
-}
-
-const (
-	OpEqual  = 0
-	OpInsert = 1
-	OpDelete = 2
-	version  = 1
-)
-
-func encodeDiffs(diffs []Diff) []byte {
-	var out bytes.Buffer
-
-	vb := make([]byte, binary.MaxVarintLen64)
-
-	out.WriteByte(version)
-
-	for _, diff := range diffs {
-		tl := uint64(len(diff.Text))
-		n := binary.PutUvarint(vb, tl)
-
-		out.Write([]byte{byte(diff.Type)})
-		out.Write(vb[:n])
-
-		if diff.Type == DiffInsert {
-			out.Write(diff.Text)
-		}
-	}
-
-	return out.Bytes()
-}
-
-// indexOf returns the first index of pattern in str, starting at str[i].
-func indexOf(str string, pattern string, i int) int {
-	if i > len(str)-1 {
-		return -1
-	}
-	if i <= 0 {
-		return strings.Index(str, pattern)
-	}
-	ind := strings.Index(str[i:], pattern)
-	if ind == -1 {
-		return -1
-	}
-	return ind + i
 }
 
 func bytesIndexOf(target, pattern []byte, i int) int {

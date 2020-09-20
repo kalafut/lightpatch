@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"time"
 
@@ -12,45 +11,39 @@ import (
 
 var CLI struct {
 	Make struct {
-		BaseFile   *os.File      `arg help:"Base filename"`
-		UpdateFile *os.File      `arg help:"Updated filename"`
-		TimeLimit  time.Duration `name:"t" help:"Max time to build patch."`
-	} `cmd help:"Make a patch file to turn 'base' into 'update'."`
+		BeforeFile *os.File      `arg help:"Before file"`
+		AfterFile  *os.File      `arg help:"After file"`
+		TimeLimit  time.Duration `name:"t" default:"5s" help:"Max time to build patch."`
+	} `cmd help:"Make a patch file to turn 'before' into 'after'."`
 
 	Apply struct {
-		BaseFile  *os.File `arg help:"Base filename"`
-		PatchFile *os.File `arg help:"Patch filename"`
+		BeforeFile *os.File `arg help:"Before filename"`
+		PatchFile  *os.File `arg help:"Patch filename"`
 	} `cmd help:"Apply a patch file."`
-}
-
-func mustReadAll(f *os.File) []byte {
-	d, err := ioutil.ReadAll(f)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	return d
 }
 
 func main() {
 	ctx := kong.Parse(&CLI)
 	switch ctx.Command() {
-	case "make <base-file> <update-file>":
-		patch := minipatch.MakePatch(
-			mustReadAll(CLI.Make.BaseFile),
-			mustReadAll(CLI.Make.UpdateFile),
-		)
-		os.Stdout.Write(patch)
-	case "apply <base-file> <patch-file>":
-		patched, err := minipatch.ApplyPatch(
-			mustReadAll(CLI.Apply.BaseFile),
-			mustReadAll(CLI.Apply.PatchFile),
-		)
-		if err != nil {
+	case "make <before-file> <after-file>":
+		if err := minipatch.MakePatchTimeout(
+			CLI.Make.BeforeFile,
+			CLI.Make.AfterFile,
+			os.Stdout,
+			CLI.Make.TimeLimit,
+		); err != nil {
+			fmt.Fprintf(os.Stderr, "error creating patch: %s\n", err)
+			os.Exit(1)
+		}
+	case "apply <before-file> <patch-file>":
+		if err := minipatch.ApplyPatch(
+			CLI.Apply.BeforeFile,
+			CLI.Apply.PatchFile,
+			os.Stdout,
+		); err != nil {
 			fmt.Fprintf(os.Stderr, "error applying patch: %s\n", err)
 			os.Exit(1)
 		}
-		os.Stdout.Write(patched)
 	default:
 		panic(ctx.Command())
 	}
