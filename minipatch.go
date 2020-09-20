@@ -32,20 +32,46 @@ func MakePatch(before, after io.Reader, output io.Writer) error {
 }
 
 func MakePatchTimeout(before, after io.Reader, patch io.Writer, timeout time.Duration) error {
-	a, _ := ioutil.ReadAll(before)
-	b, _ := ioutil.ReadAll(after)
-	diffs := diffMain(a, b, timeout)
+	beforeBytes, err := ioutil.ReadAll(before)
+	if err != nil {
+		return err
+	}
+	afterBytes, err := ioutil.ReadAll(after)
+	if err != nil {
+		return err
+	}
 
-	vb := make([]byte, binary.MaxVarintLen64)
+	diffs := diffMain(beforeBytes, afterBytes, timeout)
+
+	// If inputs are very different, the total size of the encoded diffs can be greater than just
+	// outputting after bytes. We'll check whether this "naive" diff is actually shorter.
+	naiveDiff := []diff{
+		{
+			Type: OpInsert,
+			Text: afterBytes,
+		},
+	}
+
+	if encodedLen(naiveDiff) < encodedLen(diffs) {
+		diffs = naiveDiff
+	}
+
+	varintBuf := make([]byte, binary.MaxVarintLen64)
 
 	for _, diff := range diffs {
-		patch.Write([]byte{diff.Type})
+		if _, err := patch.Write([]byte{diff.Type}); err != nil {
+			return err
+		}
 
-		n := binary.PutUvarint(vb, uint64(len(diff.Text)))
-		patch.Write(vb[:n])
+		n := binary.PutUvarint(varintBuf, uint64(len(diff.Text)))
+		if _, err := patch.Write(varintBuf[:n]); err != nil {
+			return err
+		}
 
 		if diff.Type == OpInsert {
-			patch.Write(diff.Text)
+			if _, err := patch.Write(diff.Text); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -145,7 +171,32 @@ func diffMain(text1, text2 []byte, timeout time.Duration) []diff {
 	if timeout > 0 {
 		deadline = time.Now().Add(timeout)
 	}
+
 	return diffMainBytes(text1, text2, deadline)
+}
+
+func encodedLen(diffs []diff) int {
+	var total int
+
+	for _, d := range diffs {
+		// Op bytes
+		total++
+
+		// Size bytes
+		x := len(d.Text)
+		for x >= 0x80 {
+			x >>= 7
+			total++
+		}
+		total++
+
+		// Data
+		if d.Type == OpInsert {
+			total += len(d.Text)
+		}
+	}
+
+	return total
 }
 
 func diffMainBytes(text1, text2 []byte, deadline time.Time) []diff {

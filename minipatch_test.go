@@ -11,6 +11,7 @@ package minipatch
 import (
 	"bytes"
 	"fmt"
+	"math/rand"
 	"testing"
 	"time"
 
@@ -637,19 +638,41 @@ func TestDiffMainWithTimeout(t *testing.T) {
 }
 
 func Test_minipatch(t *testing.T) {
-	a := []byte("The quick brown fox jumped over the lazy dog.")
-	b := []byte("The quick brown cat jumped over the dog!")
+	t.Run("basic diff", func(t *testing.T) {
+		a := []byte("The quick brown fox jumped over the lazy dog.")
+		b := []byte("The quick brown cat jumped over the dog!")
 
-	ar := bytes.NewReader(a)
-	br := bytes.NewReader(b)
-	var patchr bytes.Buffer
-	err := MakePatch(ar, br, &patchr)
-	assert.NoError(t, err)
+		ar := bytes.NewReader(a)
+		br := bytes.NewReader(b)
 
-	ar = bytes.NewReader(a)
+		var patchr bytes.Buffer
+		err := MakePatch(ar, br, &patchr)
+		assert.NoError(t, err)
 
-	var c bytes.Buffer
-	err = ApplyPatch(ar, &patchr, &c)
-	assert.NoError(t, err)
-	assert.Equal(t, b, c.Bytes())
+		ar = bytes.NewReader(a)
+
+		var c bytes.Buffer
+		err = ApplyPatch(ar, &patchr, &c)
+		assert.NoError(t, err)
+		assert.Equal(t, b, c.Bytes())
+	})
+
+	t.Run("naive diff", func(t *testing.T) {
+		a := make([]byte, 100)
+		b := make([]byte, 100)
+		rand.Read(a)
+		rand.Read(b)
+
+		ar := bytes.NewReader(a)
+		br := bytes.NewReader(b)
+
+		var patchr bytes.Buffer
+		err := MakePatch(ar, br, &patchr)
+		assert.NoError(t, err)
+
+		// Check that we fell back to a naive diff (copying data) for this case of
+		// "undiffable" random inputs. Without falling back to a naive diff, the
+		// output is more than 150 bytes.
+		assert.Equal(t, 102, patchr.Len())
+	})
 }
