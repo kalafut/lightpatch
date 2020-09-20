@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CMD=./minipatch
+CMD=./lightpatch
 TD=../../testdata
 
 for t in simple unicode angular

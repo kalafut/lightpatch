@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
-	"github.com/kalafut/minipatch"
+	"github.com/kalafut/lightpatch"
 )
 
 var CLI struct {
@@ -26,7 +26,7 @@ func main() {
 	ctx := kong.Parse(&CLI)
 	switch ctx.Command() {
 	case "make <before-file> <after-file>":
-		if err := minipatch.MakePatchTimeout(
+		if err := lightpatch.MakePatchTimeout(
 			CLI.Make.BeforeFile,
 			CLI.Make.AfterFile,
 			os.Stdout,
@@ -36,7 +36,7 @@ func main() {
 			os.Exit(1)
 		}
 	case "apply <before-file> <patch-file>":
-		if err := minipatch.ApplyPatch(
+		if err := lightpatch.ApplyPatch(
 			CLI.Apply.BeforeFile,
 			CLI.Apply.PatchFile,
 			os.Stdout,
