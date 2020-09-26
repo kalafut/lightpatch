@@ -28,10 +28,15 @@ var (
 	ErrExtraData = errors.New("unexpected data following CRC")
 )
 
+// MatchPatch generates a diff to change before into after, writing the output to patch.
 func MakePatch(before, after io.Reader, output io.Writer) error {
 	return MakePatchTimeout(before, after, output, DefaultTimeout)
 }
 
+// MatchPatchTimeout generates a diff to change before into after, writing the output to
+// patch. timeout is the max time to try to make an efficient patch. The operation will
+// still succeed even if timeout is reached, with perhaps a less compact patch. If timeout
+// is 0 the function will take as long as it needs to complete.
 func MakePatchTimeout(before, after io.Reader, patch io.Writer, timeout time.Duration) error {
 	beforeBytes, err := ioutil.ReadAll(before)
 	if err != nil {
@@ -86,6 +91,8 @@ func MakePatchTimeout(before, after io.Reader, patch io.Writer, timeout time.Dur
 	return nil
 }
 
+// ApplyPatch reads before, applies the edits from patch, and writes
+// the output to after.
 func ApplyPatch(before, patch io.Reader, after io.Writer) error {
 	var crcRead bool
 	var n = crc32.NewIEEE()
