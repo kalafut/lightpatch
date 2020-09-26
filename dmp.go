@@ -1,3 +1,5 @@
+package lightpatch
+
 // The algorithms and tests in lightpatch were largely adapted from the go-diff
 // library, which in turn was derived from the Diff-Map-Patch library. The
 // original copyright is retained:
@@ -9,7 +11,6 @@
 // go-diff is a Go implementation of Google's diff, Match, and Patch library
 // Original library is Copyright (c) 2006 Google Inc.
 // http://code.google.com/p/google-diff-match-patch/
-package lightpatch
 
 import (
 	"bytes"

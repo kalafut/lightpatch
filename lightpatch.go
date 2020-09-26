@@ -1,3 +1,5 @@
+// Package lightpatch generates and applies patch files. A description of the patch file
+// format is included in the README.
 package lightpatch
 
 import (
