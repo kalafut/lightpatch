@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -26,24 +27,31 @@ func main() {
 	ctx := kong.Parse(&CLI)
 	switch ctx.Command() {
 	case "make <before-file> <after-file>":
-		if err := lightpatch.MakePatchTimeout(
-			CLI.Make.BeforeFile,
-			CLI.Make.AfterFile,
-			os.Stdout,
-			CLI.Make.TimeLimit,
-		); err != nil {
-			fmt.Fprintf(os.Stderr, "error creating patch: %s\n", err)
-			os.Exit(1)
+		before, err := io.ReadAll(CLI.Make.BeforeFile)
+		if err != nil {
+			panic(err)
 		}
+		after, err := io.ReadAll(CLI.Make.AfterFile)
+		if err != nil {
+			panic(err)
+		}
+		patch := lightpatch.MakePatch(before, after)
+		os.Stdout.Write(patch)
 	case "apply <before-file> <patch-file>":
-		if err := lightpatch.ApplyPatch(
-			CLI.Apply.BeforeFile,
-			CLI.Apply.PatchFile,
-			os.Stdout,
-		); err != nil {
-			fmt.Fprintf(os.Stderr, "error applying patch: %s\n", err)
+		before, err := io.ReadAll(CLI.Apply.BeforeFile)
+		if err != nil {
+			panic(err)
+		}
+		patch, err := io.ReadAll(CLI.Apply.PatchFile)
+		if err != nil {
+			panic(err)
+		}
+		after, err := lightpatch.ApplyPatch(before, patch)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\nerror applying patch: %s\n", err)
 			os.Exit(1)
 		}
+		os.Stdout.Write(after)
 	default:
 		panic(ctx.Command())
 	}

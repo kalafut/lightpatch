@@ -49,15 +49,11 @@ The lightpatch file format is a simple [TLV](https://en.wikipedia.org/wiki/Type-
 | Copy     | C (0x43) | Copy `len` bytes from _source_ to _dest_. `data` is not used.| 
 | Insert   | I (0x49) | Insert the next `len` bytes from `data` into _dest_. |
 | Delete   | D (0x44) | "Delete" the next `len` _source_ bytes by advancing the source input and output nothing to _dest_. `data` is not used. | 
-| Checksum | K (0x4B) | (Optional) The next 4 bytes are the CRC-32 of _dest_. If present, this must be the final command of the patch file. |
 
 The `len` parameter is [varint encoded](https://developers.google.com/protocol-buffers/docs/encoding#varints). Libraries are readily available to handle this encoding (and even a hand-rolled decoder is only a few lines).
 
-### Checksum (CRC-32)
 
-CRC handling is optional on both ends. An encoder doesn't have to include it, and decoder don't have to verify them. It's better if they do, but in very simple cases the complexity may not be desired. Regardless if a decoder is verifying it or not, it should still return an error if there is data following the CRC, as that is an invalid patch.
-
-The CRC uses the common CRC-32-IEEE polynomial.
+[op len] [command] [data]
 
 ### Example
 
@@ -79,6 +75,13 @@ Patch (hex):
 49 01 2e       insert 1 byte (".")
 4b 96 f6 b7 6c CRC-32 is 0x96f6b76c
 ```
+
+14C
+3D
+3Ilea
+15C
+1I.
+
 
 ### Credits
 

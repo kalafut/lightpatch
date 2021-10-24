@@ -1,7 +1,6 @@
 package lightpatch
 
 import (
-	"bytes"
 	"math/rand"
 	"testing"
 
@@ -13,19 +12,23 @@ func Test_lightpatch(t *testing.T) {
 		a := []byte("The quick brown fox jumped over the lazy dog.")
 		b := []byte("The quick brown cat jumped over the dog!")
 
-		ar := bytes.NewReader(a)
-		br := bytes.NewReader(b)
+		patch := MakePatch(a, b)
 
-		var patchr bytes.Buffer
-		err := MakePatch(ar, br, &patchr)
+		after, err := ApplyPatch(a, patch)
 		assert.NoError(t, err)
+		assert.Equal(t, b, after)
+	})
 
-		ar = bytes.NewReader(a)
+	t.Run("corrupt diff", func(t *testing.T) {
+		a := []byte("The quick brown fox jumped over the lazy dog.")
+		b := []byte("The quick brown cat jumped over the dog!")
 
-		var c bytes.Buffer
-		err = ApplyPatch(ar, &patchr, &c)
-		assert.NoError(t, err)
-		assert.Equal(t, b, c.Bytes())
+		patch := MakePatch(a, b)
+
+		a[10]++
+
+		_, err := ApplyPatch(a, patch)
+		assert.EqualError(t, err, ErrCRC.Error())
 	})
 
 	t.Run("naive diff", func(t *testing.T) {
@@ -34,56 +37,21 @@ func Test_lightpatch(t *testing.T) {
 		rand.Read(a)
 		rand.Read(b)
 
-		ar := bytes.NewReader(a)
-		br := bytes.NewReader(b)
-
-		var patchr bytes.Buffer
-		err := MakePatch(ar, br, &patchr)
-		assert.NoError(t, err)
+		patch := MakePatch(a, b)
 
 		// Check that we fell back to a naive diff (copying data) for this case of
-		// "undiffable" random inputs. Without falling back to a naive diff, the
-		// output is more than 150 bytes.
-		assert.Equal(t, 107, patchr.Len())
+		// "undiffable" random inputs. The length will be 2 hex digits and an op code,
+		// plus 8 CRC bytes and an op code, plus the original length.
+		assert.Equal(t, 100+3+9, len(patch))
 	})
 
-	t.Run("crc check", func(t *testing.T) {
-		a := []byte("The quick brown fox jumped over the lazy dog.")
-		b := []byte("The quick brown cat jumped over the dog!")
+	t.Run("format test", func(t *testing.T) {
+		a := "The quick brown fox jumped over the lazy dog"
+		b := "The quick brown fox leaped over the lazy dog🎉"
 
-		ar := bytes.NewReader(a)
-		br := bytes.NewReader(b)
+		patch := MakePatch([]byte(a), []byte(b))
 
-		var patchr bytes.Buffer
-		err := MakePatch(ar, br, &patchr)
-		assert.NoError(t, err)
-
-		// alter a to change the crc
-		a[0] = 't'
-		ar = bytes.NewReader(a)
-
-		var c bytes.Buffer
-		err = ApplyPatch(ar, &patchr, &c)
-		assert.EqualError(t, err, ErrCRC.Error())
-	})
-
-	t.Run("extra patch bytes", func(t *testing.T) {
-		a := []byte("The quick brown fox jumped over the lazy dog.")
-		b := []byte("The quick brown cat jumped over the dog!")
-
-		ar := bytes.NewReader(a)
-		br := bytes.NewReader(b)
-
-		var patchr bytes.Buffer
-		err := MakePatch(ar, br, &patchr)
-		assert.NoError(t, err)
-
-		ar = bytes.NewReader(a)
-
-		// add a byte to the patch, which isn't allowed after the CRC
-		patchr.WriteByte(42)
-
-		err = ApplyPatch(ar, &patchr, new(bytes.Buffer))
-		assert.EqualError(t, err, ErrExtraData.Error())
+		exp := "14C3D3Ilea15C4I🎉40763bb0K"
+		assert.Equal(t, exp, string(patch))
 	})
 }

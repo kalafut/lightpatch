@@ -29,4 +29,4 @@ if ! ($CMD apply "$TMPDIR/random_in" "$TMPDIR/random.patch" | cmp -s "$TMPDIR/ra
   echo Failed random test; exit 1
 fi
 
-echo All test completed successfully
+echo All tests completed successfully

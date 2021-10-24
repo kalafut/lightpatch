@@ -5,178 +5,147 @@ package lightpatch
 import (
 	"bufio"
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
-	"io/ioutil"
-	"time"
+	"math"
+	"strconv"
+
+	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
 const (
-	OpCopy   byte = 'C'
-	OpInsert byte = 'I'
-	OpDelete byte = 'D'
-	OpCRC    byte = 'K'
-
-	DefaultTimeout = 5 * time.Second
+	OpCopy   = 'C'
+	OpInsert = 'I'
+	OpDelete = 'D'
+	OpCRC    = 'K'
 )
 
 var (
-	ErrCRC       = errors.New("CRC mismatch")
-	ErrExtraData = errors.New("unexpected data following CRC")
+	opmap = map[diffmatchpatch.Operation]byte{
+		diffmatchpatch.DiffEqual:  OpCopy,
+		diffmatchpatch.DiffInsert: OpInsert,
+		diffmatchpatch.DiffDelete: OpDelete,
+	}
+
+	ErrCRC = errors.New("CRC mismatch")
 )
 
-// MatchPatch generates a diff to change before into after, writing the output to patch.
-func MakePatch(before, after io.Reader, output io.Writer) error {
-	return MakePatchTimeout(before, after, output, DefaultTimeout)
-}
+// MakePatch generates a diff to change before into after, writing the output to patch.
+func MakePatch(before, after []byte) []byte {
+	var patch []byte
 
-// MatchPatchTimeout generates a diff to change before into after, writing the output to
-// patch. timeout is the max time to try to make an efficient patch. The operation will
-// still succeed even if timeout is reached, with perhaps a less compact patch. If timeout
-// is 0 the function will take as long as it needs to complete.
-func MakePatchTimeout(before, after io.Reader, patch io.Writer, timeout time.Duration) error {
-	beforeBytes, err := ioutil.ReadAll(before)
-	if err != nil {
-		return err
-	}
-	afterBytes, err := ioutil.ReadAll(after)
-	if err != nil {
-		return err
-	}
-
-	diffs := diffMain(beforeBytes, afterBytes, timeout)
+	dmp := diffmatchpatch.New()
+	diffs := dmp.DiffMain(string(before), string(after), false)
 
 	// If inputs are very different, the total size of the encoded diffs can be greater than just
-	// outputting after bytes. We'll check whether this "naive" diff is actually shorter.
-	naiveDiff := []diff{
-		{
-			Type: OpInsert,
-			Text: afterBytes,
-		},
+	// outputting after bytes. Check whether this "naive" diff is actually shorter.
+	if len(after) < encodedLen(diffs) {
+		diffs = []diffmatchpatch.Diff{
+			{
+				Type: diffmatchpatch.DiffInsert,
+				Text: string(after),
+			},
+		}
 	}
-
-	if encodedLen(naiveDiff) < encodedLen(diffs) {
-		diffs = naiveDiff
-	}
-
-	varintBuf := make([]byte, binary.MaxVarintLen64)
 
 	for _, diff := range diffs {
-		if _, err := patch.Write([]byte{diff.Type}); err != nil {
-			return err
-		}
+		patch = append(patch, []byte(fmt.Sprintf("%x", len(diff.Text)))...)
+		patch = append(patch, []byte{opmap[diff.Type]}...)
 
-		n := binary.PutUvarint(varintBuf, uint64(len(diff.Text)))
-		if _, err := patch.Write(varintBuf[:n]); err != nil {
-			return err
-		}
-
-		if diff.Type == OpInsert {
-			if _, err := patch.Write(diff.Text); err != nil {
-				return err
-			}
+		if diff.Type == diffmatchpatch.DiffInsert {
+			patch = append(patch, []byte(diff.Text)...)
 		}
 	}
 
-	n := crc32.NewIEEE()
-	n.Write(afterBytes)
+	patch = append(patch, []byte(fmt.Sprintf("%x%c", crc32.ChecksumIEEE(after), OpCRC))...)
 
-	if _, err := patch.Write(n.Sum([]byte{OpCRC})); err != nil {
-		return err
-	}
-
-	return nil
+	return patch
 }
 
 // ApplyPatch reads before, applies the edits from patch, and writes
 // the output to after.
-func ApplyPatch(before, patch io.Reader, after io.Writer) error {
-	var crcRead bool
-	var n = crc32.NewIEEE()
+func ApplyPatch(beforeByte, patchByte []byte) ([]byte, error) {
+	after := new(bytes.Buffer)
 
-	after = io.MultiWriter(after, n)
-	beforeBR := bufio.NewReader(before)
-	patchBR := bufio.NewReader(patch)
+	beforeBR := bufio.NewReader(bytes.NewReader(beforeByte))
+	patchBR := bufio.NewReader(bytes.NewReader(patchByte))
 
 	for {
-		op, err := patchBR.ReadByte()
+		tl, op, err := readOp(patchBR)
 		if err == io.EOF {
-			break
+			return nil, io.ErrUnexpectedEOF
 		} else if err != nil {
-			return err
-		}
-
-		if crcRead {
-			return ErrExtraData
-		}
-
-		var tl uint64
-		if op != OpCRC {
-			tl, err = binary.ReadUvarint(patchBR)
-			if err != nil {
-				return err
-			}
+			return nil, err
 		}
 
 		switch op {
 		case OpCopy:
-			_, err := io.CopyN(after, beforeBR, int64(tl))
-			if err != nil {
-				return err
-			}
+			_, err = io.CopyN(after, beforeBR, int64(tl))
 		case OpInsert:
-			_, err := io.CopyN(after, patchBR, int64(tl))
-			if err != nil {
-				return err
-			}
+			_, err = io.CopyN(after, patchBR, int64(tl))
 		case OpDelete:
-			_, err := beforeBR.Discard(int(tl))
-			if err != nil {
-				return err
-			}
+			_, err = beforeBR.Discard(tl)
 		case OpCRC:
-			patchCRC := make([]byte, 4)
-			_, err := io.ReadFull(patchBR, patchCRC)
-			if err != nil {
-				return err
+			all := after.Bytes()
+			if crc32.ChecksumIEEE(all) != uint32(tl) {
+				return nil, ErrCRC
 			}
 
-			if !bytes.Equal(patchCRC, n.Sum(nil)) {
-				return ErrCRC
-			}
-			crcRead = true
+			return all, nil
 
 		default:
-			return fmt.Errorf("unexpected operation byte: %x", op)
+			return nil, fmt.Errorf("unexpected operation byte: %x", op)
+		}
+		if err != nil {
+			return nil, err
 		}
 	}
-
-	return nil
 }
 
-func encodedLen(diffs []diff) int {
+func encodedLen(diffs []diffmatchpatch.Diff) int {
 	var total int
 
 	for _, d := range diffs {
-		// Op bytes
-		total++
+		// Length of encoded data length
+		total += int(math.Ceil(math.Log(float64(len(d.Text))) / math.Log(16)))
 
-		// Size bytes. Copied from varint code
-		x := len(d.Text)
-		for x >= 0x80 {
-			x >>= 7
-			total++
-		}
+		// Op byte
 		total++
 
 		// Data
-		if d.Type == OpInsert {
+		if d.Type == diffmatchpatch.DiffInsert {
 			total += len(d.Text)
 		}
 	}
 
 	return total
+}
+
+func readOp(r *bufio.Reader) (int, byte, error) {
+	s := make([]byte, 0, 10)
+
+	for {
+		c, err := r.ReadByte()
+		if err != nil {
+			return 0, 0, err
+		}
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
+			s = append(s, c)
+		case c == OpCopy, c == OpInsert, c == OpDelete, c == OpCRC:
+			if len(s) == 0 {
+				return 0, 0, errors.New("missing operation length")
+			}
+			l, err := strconv.ParseInt(string(s), 16, 64)
+			if err != nil {
+				return 0, 0, fmt.Errorf("error decoding length: %w", err)
+			}
+			return int(l), c, nil
+
+		default:
+			return 0, 0, errors.New("error decoding operation: " + string(c))
+		}
+	}
 }
