@@ -33,8 +33,13 @@ var (
 )
 
 // MakePatch generates a diff to change before into after, writing the output to patch.
-func MakePatch(before, after []byte) []byte {
+func MakePatch(before, after []byte, o ...FuncOption) []byte {
+	var cfg config
 	var patch []byte
+
+	for _, f := range o {
+		f(&cfg)
+	}
 
 	dmp := diffmatchpatch.New()
 	diffs := dmp.DiffMain(string(before), string(after), false)
@@ -59,14 +64,24 @@ func MakePatch(before, after []byte) []byte {
 		}
 	}
 
-	patch = append(patch, []byte(fmt.Sprintf("%x%c", crc32.ChecksumIEEE(after), OpCRC))...)
+	var crc uint32
+	if !cfg.noCRC {
+		crc = crc32.ChecksumIEEE(after)
+	}
+	patch = append(patch, []byte(fmt.Sprintf("%x%c", crc, OpCRC))...)
 
 	return patch
 }
 
 // ApplyPatch reads before, applies the edits from patch, and writes
 // the output to after.
-func ApplyPatch(beforeByte, patchByte []byte) ([]byte, error) {
+func ApplyPatch(beforeByte, patchByte []byte, o ...FuncOption) ([]byte, error) {
+	var cfg config
+
+	for _, f := range o {
+		f(&cfg)
+	}
+
 	after := new(bytes.Buffer)
 
 	beforeBR := bufio.NewReader(bytes.NewReader(beforeByte))
@@ -89,7 +104,8 @@ func ApplyPatch(beforeByte, patchByte []byte) ([]byte, error) {
 			_, err = beforeBR.Discard(tl)
 		case OpCRC:
 			all := after.Bytes()
-			if crc32.ChecksumIEEE(all) != uint32(tl) {
+			crc := uint32(tl)
+			if !cfg.noCRC && crc != 0 && crc32.ChecksumIEEE(all) != crc {
 				return nil, ErrCRC
 			}
 

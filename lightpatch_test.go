@@ -19,16 +19,36 @@ func Test_lightpatch(t *testing.T) {
 		assert.Equal(t, b, after)
 	})
 
-	t.Run("corrupt diff", func(t *testing.T) {
+	t.Run("CRC options", func(t *testing.T) {
 		a := []byte("The quick brown fox jumped over the lazy dog.")
 		b := []byte("The quick brown cat jumped over the dog!")
 
 		patch := MakePatch(a, b)
 
+		// base case of default options and no corruption
+		_, err := ApplyPatch(a, patch)
+		assert.NoError(t, err)
+
+		// corrupt input
 		a[10]++
 
-		_, err := ApplyPatch(a, patch)
+		// default case will error on mismatched CRC
+		_, err = ApplyPatch(a, patch)
 		assert.EqualError(t, err, ErrCRC.Error())
+
+		// ignore CRC checking
+		_, err = ApplyPatch(a, patch, WithNoCRC())
+		assert.NoError(t, err)
+
+		a = []byte("The quick brown fox jumped over the lazy dog.")
+		b = []byte("The quick brown cat jumped over the dog!")
+
+		// check that disabling CRC on generation works
+		patch = MakePatch(a, b, WithNoCRC())
+		a[10]++
+		_, err = ApplyPatch(a, patch)
+		assert.NoError(t, err)
+
 	})
 
 	t.Run("naive diff", func(t *testing.T) {
