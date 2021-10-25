@@ -62,7 +62,7 @@ func Test_lightpatch(t *testing.T) {
 		// Check that we fell back to a naive diff (copying data) for this case of
 		// "undiffable" random inputs. The length will be 2 hex digits and an op code,
 		// plus 8 CRC bytes and an op code, plus the original length.
-		assert.Equal(t, 100+3+9, len(patch))
+		assert.Equal(t, 1+100+3+9, len(patch))
 	})
 
 	t.Run("format test", func(t *testing.T) {
@@ -71,7 +71,7 @@ func Test_lightpatch(t *testing.T) {
 
 		patch := MakePatch([]byte(a), []byte(b))
 
-		exp := "14C3D3Ilea15C4I🎉40763bb0K"
+		exp := "A14C3D3Ilea15C4I🎉40763bb0K"
 		assert.Equal(t, exp, string(patch))
 	})
 
@@ -82,5 +82,14 @@ func Test_lightpatch(t *testing.T) {
 
 		_, err := ApplyPatch([]byte(a), []byte(patch))
 		assert.Error(t, err)
+	})
+
+	t.Run("bad patch: missing version", func(t *testing.T) {
+		a := "The quick brown fox jumped over the lazy dog"
+
+		patch := "2IZZ19239a8234C3D3Ilea15C4I🎉40763bb0K"
+
+		_, err := ApplyPatch([]byte(a), []byte(patch))
+		assert.EqualError(t, err, "unknown version '2'")
 	})
 }

@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	Version  = 'A'
 	OpCopy   = 'C'
 	OpInsert = 'I'
 	OpDelete = 'D'
@@ -55,6 +56,8 @@ func MakePatch(before, after []byte, o ...FuncOption) []byte {
 		}
 	}
 
+	patch = append(patch, Version)
+
 	for _, diff := range diffs {
 		patch = append(patch, []byte(fmt.Sprintf("%x", len(diff.Text)))...)
 		patch = append(patch, []byte{opmap[diff.Type]}...)
@@ -86,6 +89,16 @@ func ApplyPatch(beforeByte, patchByte []byte, o ...FuncOption) ([]byte, error) {
 
 	beforeBR := bufio.NewReader(bytes.NewReader(beforeByte))
 	patchBR := newTrackedReader(patchByte)
+
+    ver, err:=patchBR.ReadByte()
+    if err!= nil {
+    	return nil, err
+    }
+
+    if ver != Version {
+    	return nil, fmt.Errorf("unknown version %q", ver)
+    }
+
 
 	for {
 		tl, op, err := readOp(patchBR)
