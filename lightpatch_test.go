@@ -46,9 +46,9 @@ func Test_lightpatch(t *testing.T) {
 		// check that disabling CRC on generation works
 		patch = MakePatch(a, b, WithNoCRC())
 		a[10]++
+
 		_, err = ApplyPatch(a, patch)
 		assert.NoError(t, err)
-
 	})
 
 	t.Run("naive diff", func(t *testing.T) {
@@ -73,5 +73,14 @@ func Test_lightpatch(t *testing.T) {
 
 		exp := "14C3D3Ilea15C4I🎉40763bb0K"
 		assert.Equal(t, exp, string(patch))
+	})
+
+	t.Run("bad patch: excessive length", func(t *testing.T) {
+		a := "The quick brown fox jumped over the lazy dog"
+
+		patch := "2IZZ19239a8234C3D3Ilea15C4I🎉40763bb0K"
+
+		_, err := ApplyPatch([]byte(a), []byte(patch))
+		assert.Error(t, err)
 	})
 }

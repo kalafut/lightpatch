@@ -85,7 +85,7 @@ func ApplyPatch(beforeByte, patchByte []byte, o ...FuncOption) ([]byte, error) {
 	after := new(bytes.Buffer)
 
 	beforeBR := bufio.NewReader(bytes.NewReader(beforeByte))
-	patchBR := bufio.NewReader(bytes.NewReader(patchByte))
+	patchBR := newTrackedReader(patchByte)
 
 	for {
 		tl, op, err := readOp(patchBR)
@@ -139,7 +139,7 @@ func encodedLen(diffs []diffmatchpatch.Diff) int {
 	return total
 }
 
-func readOp(r *bufio.Reader) (int, byte, error) {
+func readOp(r *trackedReader) (int, byte, error) {
 	s := make([]byte, 0, 10)
 
 	for {
@@ -150,18 +150,36 @@ func readOp(r *bufio.Reader) (int, byte, error) {
 		switch {
 		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
 			s = append(s, c)
+			if len(s) > 9 {
+				return 0, 0, fmt.Errorf("expected operation code, pos: %d", r.pos())
+			}
 		case c == OpCopy, c == OpInsert, c == OpDelete, c == OpCRC:
 			if len(s) == 0 {
-				return 0, 0, errors.New("missing operation length")
+				return 0, 0, fmt.Errorf("missing operation length, pos: %d", r.pos())
 			}
 			l, err := strconv.ParseInt(string(s), 16, 64)
 			if err != nil {
-				return 0, 0, fmt.Errorf("error decoding length: %w", err)
+				return 0, 0, fmt.Errorf("error decoding length: %w, pos: %d", err, r.pos())
 			}
 			return int(l), c, nil
 
 		default:
-			return 0, 0, errors.New("error decoding operation: " + string(c))
+			return 0, 0, fmt.Errorf("error decoding operation %q, pos: %d", string(c), r.pos())
 		}
 	}
+}
+
+type trackedReader struct {
+	*bytes.Reader
+	bytesRead int
+}
+
+func newTrackedReader(b []byte) *trackedReader {
+	return &trackedReader{
+		Reader: bytes.NewReader(b),
+	}
+}
+
+func (t *trackedReader) pos() int64 {
+	return t.Size() - int64(t.Len())
 }
