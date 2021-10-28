@@ -5,7 +5,7 @@ package lightpatch
 import (
 	"bufio"
 	"bytes"
-	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"unicode/utf8"
 
-	"github.com/kalafut/mu"
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
@@ -47,9 +46,9 @@ func MakePatch(before, after []byte, o ...FuncOption) ([]byte, error) {
 
 	var beforeStr string
 	var afterStr string
-	if cfg.base64 {
-		beforeStr = base64.StdEncoding.EncodeToString(before)
-		afterStr = base64.StdEncoding.EncodeToString(after)
+	if cfg.binary {
+		beforeStr = hex.EncodeToString(before)
+		afterStr = hex.EncodeToString(after)
 	} else {
 		if !utf8.Valid(before) {
 			return nil, errors.New("non-utf8 data in 'before' data")
@@ -105,8 +104,8 @@ func ApplyPatch(beforeByte, patchByte []byte, o ...FuncOption) ([]byte, error) {
 		f(&cfg)
 	}
 
-	if cfg.base64 {
-		beforeByte = mu.Base64Encode(beforeByte)
+	if cfg.binary {
+		beforeByte = []byte(hex.EncodeToString(beforeByte))
 	}
 
 	after := new(bytes.Buffer)
@@ -139,11 +138,13 @@ func ApplyPatch(beforeByte, patchByte []byte, o ...FuncOption) ([]byte, error) {
 			_, err = beforeBR.Discard(tl)
 		case OpCRC:
 			all := after.Bytes()
-			if cfg.base64 {
-				all, err = mu.Base64Decode(all)
+			if cfg.binary {
+				dst := make([]byte, hex.DecodedLen(len(all)))
+				_, err = hex.Decode(dst, all)
 				if err != nil {
 					return nil, err
 				}
+				all = dst
 			}
 			crc := uint32(tl)
 			if !cfg.noCRC && crc != 0 && crc32.ChecksumIEEE(all) != crc {

@@ -122,10 +122,10 @@ func Test_lightpatch(t *testing.T) {
 		assert.EqualError(t, err, "non-utf8 data in 'before' data")
 
 		// but base64 encoded should work
-		patch, err := MakePatch(a, b, WithBase64()) //, WithNoCRC())
+		patch, err := MakePatch(a, b, WithBinary()) //, WithNoCRC())
 		assert.NoError(t, err)
 
-		out, err := ApplyPatch(a, patch, WithBase64())
+		out, err := ApplyPatch(a, patch, WithBinary())
 		assert.NoError(t, err)
 		assert.Equal(t, b, out)
 	})

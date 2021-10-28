@@ -21,6 +21,7 @@ var CLI struct {
 	Apply struct {
 		BeforeFile *os.File `arg help:"Before filename"`
 		PatchFile  *os.File `arg help:"Patch filename"`
+		Binary     bool
 	} `cmd help:"Apply a patch file."`
 }
 
@@ -38,7 +39,7 @@ func main() {
 		}
 		var opts []lightpatch.FuncOption
 		if CLI.Make.Binary {
-			opts = append(opts, lightpatch.WithBase64())
+			opts = append(opts, lightpatch.WithBinary())
 		}
 
 		patch, err := lightpatch.MakePatch(before, after, opts...)
@@ -56,8 +57,8 @@ func main() {
 			panic(err)
 		}
 		var opts []lightpatch.FuncOption
-		if CLI.Make.Binary {
-			opts = append(opts, lightpatch.WithBase64())
+		if CLI.Apply.Binary {
+			opts = append(opts, lightpatch.WithBinary())
 		}
 
 		after, err := lightpatch.ApplyPatch(before, patch, opts...)
