@@ -5,13 +5,16 @@ package lightpatch
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
 	"math"
 	"strconv"
+	"unicode/utf8"
 
+	"github.com/kalafut/mu"
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
@@ -34,7 +37,7 @@ var (
 )
 
 // MakePatch generates a diff to change before into after, writing the output to patch.
-func MakePatch(before, after []byte, o ...FuncOption) []byte {
+func MakePatch(before, after []byte, o ...FuncOption) ([]byte, error) {
 	var cfg config
 	var patch []byte
 
@@ -42,16 +45,33 @@ func MakePatch(before, after []byte, o ...FuncOption) []byte {
 		f(&cfg)
 	}
 
+	var beforeStr string
+	var afterStr string
+	if cfg.base64 {
+		beforeStr = base64.StdEncoding.EncodeToString(before)
+		afterStr = base64.StdEncoding.EncodeToString(after)
+	} else {
+		if !utf8.Valid(before) {
+			return nil, errors.New("non-utf8 data in 'before' data")
+		}
+		if !utf8.Valid(after) {
+			return nil, errors.New("non-utf8 data in 'after' data")
+		}
+
+		beforeStr = string(before)
+		afterStr = string(after)
+	}
+
 	dmp := diffmatchpatch.New()
-	diffs := dmp.DiffMain(string(before), string(after), false)
+	diffs := dmp.DiffMain(beforeStr, afterStr, false)
 
 	// If inputs are very different, the total size of the encoded diffs can be greater than just
 	// outputting after bytes. Check whether this "naive" diff is actually shorter.
-	if len(after) < encodedLen(diffs) {
+	if len(afterStr) < encodedLen(diffs) {
 		diffs = []diffmatchpatch.Diff{
 			{
 				Type: diffmatchpatch.DiffInsert,
-				Text: string(after),
+				Text: string(afterStr),
 			},
 		}
 	}
@@ -73,7 +93,7 @@ func MakePatch(before, after []byte, o ...FuncOption) []byte {
 	}
 	patch = append(patch, []byte(fmt.Sprintf("%x%c", crc, OpCRC))...)
 
-	return patch
+	return patch, nil
 }
 
 // ApplyPatch reads before, applies the edits from patch, and writes
@@ -85,20 +105,22 @@ func ApplyPatch(beforeByte, patchByte []byte, o ...FuncOption) ([]byte, error) {
 		f(&cfg)
 	}
 
-	after := new(bytes.Buffer)
+	if cfg.base64 {
+		beforeByte = mu.Base64Encode(beforeByte)
+	}
 
+	after := new(bytes.Buffer)
 	beforeBR := bufio.NewReader(bytes.NewReader(beforeByte))
 	patchBR := newTrackedReader(patchByte)
 
-    ver, err:=patchBR.ReadByte()
-    if err!= nil {
-    	return nil, err
-    }
+	ver, err := patchBR.ReadByte()
+	if err != nil {
+		return nil, err
+	}
 
-    if ver != Version {
-    	return nil, fmt.Errorf("unknown version %q", ver)
-    }
-
+	if ver != Version {
+		return nil, fmt.Errorf("unknown version %q", ver)
+	}
 
 	for {
 		tl, op, err := readOp(patchBR)
@@ -117,6 +139,12 @@ func ApplyPatch(beforeByte, patchByte []byte, o ...FuncOption) ([]byte, error) {
 			_, err = beforeBR.Discard(tl)
 		case OpCRC:
 			all := after.Bytes()
+			if cfg.base64 {
+				all, err = mu.Base64Decode(all)
+				if err != nil {
+					return nil, err
+				}
+			}
 			crc := uint32(tl)
 			if !cfg.noCRC && crc != 0 && crc32.ChecksumIEEE(all) != crc {
 				return nil, ErrCRC

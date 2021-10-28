@@ -1,6 +1,7 @@
 package lightpatch
 
 import (
+	"encoding/hex"
 	"math/rand"
 	"testing"
 
@@ -12,7 +13,8 @@ func Test_lightpatch(t *testing.T) {
 		a := []byte("The quick brown fox jumped over the lazy dog.")
 		b := []byte("The quick brown cat jumped over the dog!")
 
-		patch := MakePatch(a, b)
+		patch, err := MakePatch(a, b)
+		assert.NoError(t, err)
 
 		after, err := ApplyPatch(a, patch)
 		assert.NoError(t, err)
@@ -23,10 +25,11 @@ func Test_lightpatch(t *testing.T) {
 		a := []byte("The quick brown fox jumped over the lazy dog.")
 		b := []byte("The quick brown cat jumped over the dog!")
 
-		patch := MakePatch(a, b)
+		patch, err := MakePatch(a, b)
+		assert.NoError(t, err)
 
 		// base case of default options and no corruption
-		_, err := ApplyPatch(a, patch)
+		_, err = ApplyPatch(a, patch)
 		assert.NoError(t, err)
 
 		// corrupt input
@@ -44,7 +47,8 @@ func Test_lightpatch(t *testing.T) {
 		b = []byte("The quick brown cat jumped over the dog!")
 
 		// check that disabling CRC on generation works
-		patch = MakePatch(a, b, WithNoCRC())
+		patch, err = MakePatch(a, b, WithNoCRC())
+		assert.NoError(t, err)
 		a[10]++
 
 		_, err = ApplyPatch(a, patch)
@@ -57,19 +61,21 @@ func Test_lightpatch(t *testing.T) {
 		rand.Read(a)
 		rand.Read(b)
 
-		patch := MakePatch(a, b)
+		patch, err := MakePatch([]byte(hex.EncodeToString(a)), []byte(hex.EncodeToString(b)))
+		assert.NoError(t, err)
 
 		// Check that we fell back to a naive diff (copying data) for this case of
 		// "undiffable" random inputs. The length will be 2 hex digits and an op code,
 		// plus 8 CRC bytes and an op code, plus the original length.
-		assert.Equal(t, 1+100+3+9, len(patch))
+		assert.Equal(t, 1+200+3+9, len(patch))
 	})
 
 	t.Run("format test", func(t *testing.T) {
 		a := "The quick brown fox jumped over the lazy dog"
 		b := "The quick brown fox leaped over the lazy dog🎉"
 
-		patch := MakePatch([]byte(a), []byte(b))
+		patch, err := MakePatch([]byte(a), []byte(b))
+		assert.NoError(t, err)
 
 		exp := "A14C3D3Ilea15C4I🎉40763bb0K"
 		assert.Equal(t, exp, string(patch))
@@ -91,5 +97,36 @@ func Test_lightpatch(t *testing.T) {
 
 		_, err := ApplyPatch([]byte(a), []byte(patch))
 		assert.EqualError(t, err, "unknown version '2'")
+	})
+
+	t.Run("detect non-utf8 data", func(t *testing.T) {
+		bad := []byte("\xff\xff\xff")
+		good := []byte("hello")
+
+		_, err := MakePatch(bad, good)
+		assert.EqualError(t, err, "non-utf8 data in 'before' data")
+
+		_, err = MakePatch(good, bad)
+		assert.EqualError(t, err, "non-utf8 data in 'after' data")
+	})
+
+	t.Run("patch binary data", func(t *testing.T) {
+		a := make([]byte, 100)
+		b := make([]byte, 98)
+		rand.Read(a)
+		copy(b, a)
+		b[67]++
+
+		// patch of binary data should fail
+		_, err := MakePatch(a, b)
+		assert.EqualError(t, err, "non-utf8 data in 'before' data")
+
+		// but base64 encoded should work
+		patch, err := MakePatch(a, b, WithBase64()) //, WithNoCRC())
+		assert.NoError(t, err)
+
+		out, err := ApplyPatch(a, patch, WithBase64())
+		assert.NoError(t, err)
+		assert.Equal(t, b, out)
 	})
 }
