@@ -1,8 +1,8 @@
 package main
 
 import (
-	"fmt"
 	"io"
+	"log"
 	"os"
 	"time"
 
@@ -26,16 +26,19 @@ var CLI struct {
 }
 
 func main() {
+	log.SetFlags(0)
+	log.SetPrefix("error: ")
+
 	ctx := kong.Parse(&CLI)
 	switch ctx.Command() {
 	case "make <before-file> <after-file>":
 		before, err := io.ReadAll(CLI.Make.BeforeFile)
 		if err != nil {
-			panic(err)
+			log.Fatalln(err)
 		}
 		after, err := io.ReadAll(CLI.Make.AfterFile)
 		if err != nil {
-			panic(err)
+			log.Fatalln(err)
 		}
 		var opts []lightpatch.FuncOption
 		if CLI.Make.Binary {
@@ -44,18 +47,19 @@ func main() {
 
 		patch, err := lightpatch.MakePatch(before, after, opts...)
 		if err != nil {
-			panic(err)
+			log.Fatalln(err)
 		}
 		os.Stdout.Write(patch)
 	case "apply <before-file> <patch-file>":
 		before, err := io.ReadAll(CLI.Apply.BeforeFile)
 		if err != nil {
-			panic(err)
+			log.Fatalln(err)
 		}
 		patch, err := io.ReadAll(CLI.Apply.PatchFile)
 		if err != nil {
-			panic(err)
+			log.Fatalln(err)
 		}
+
 		var opts []lightpatch.FuncOption
 		if CLI.Apply.Binary {
 			opts = append(opts, lightpatch.WithBinary())
@@ -63,8 +67,7 @@ func main() {
 
 		after, err := lightpatch.ApplyPatch(before, patch, opts...)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "\nerror applying patch: %s\n", err)
-			os.Exit(1)
+			log.Fatalln(err)
 		}
 		os.Stdout.Write(after)
 	default:
